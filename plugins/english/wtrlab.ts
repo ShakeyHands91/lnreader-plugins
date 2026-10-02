@@ -84,10 +84,20 @@ class WTRLAB implements Plugin.PluginBase {
       ? contentUrl
       : this.site.replace(/\/$/, '') + contentUrl;
 
+    // Only ever send the session cookie to the source's own hosts. The server
+    // controls content_url, and an absolute one could point anywhere.
+    const hostOf = (value: string) =>
+      (value.match(/^https?:\/\/([^/?#]+)/i)?.[1] || '').toLowerCase();
+    const siteHost = hostOf(this.site);
+    const targetHost = hostOf(url);
+    const sameSite =
+      !!siteHost &&
+      (targetHost === siteHost || targetHost.endsWith('.' + siteHost));
+
     const res = await fetchApi(url, {
       headers: {
         'Accept': 'application/json',
-        ...(cookie ? { Cookie: cookie } : {}),
+        ...(cookie && sameSite ? { Cookie: cookie } : {}),
       },
     });
     const text = await res.text();
@@ -718,6 +728,7 @@ class WTRLAB implements Plugin.PluginBase {
 
     const attemptLog: string[] = [];
     let parsedJson;
+    let content: ChapterContent | null = null;
     let usedType: string | null = null;
 
     // Establish a session from the emailed link before asking for a chapter.
@@ -784,6 +795,18 @@ class WTRLAB implements Plugin.PluginBase {
         continue;
       }
 
+      // Resolve the body here, not after the loop: a healthy envelope does
+      // not guarantee a payload, and if this mode has none the next one
+      // (typically Web) should still get its turn.
+      const resolved = await this.resolveChapterContent(candidate, cookie);
+      if (!resolved || resolved.body === undefined) {
+        attemptLog.push(
+          `"${type}": request succeeded but no chapter content was returned`,
+        );
+        continue;
+      }
+
+      content = resolved;
       usedType = type;
       break;
     }
@@ -794,10 +817,6 @@ class WTRLAB implements Plugin.PluginBase {
       : cookie
         ? `session cookie sent (${cookie.length} chars)`
         : 'no session cookie set';
-
-    const content = usedType
-      ? await this.resolveChapterContent(parsedJson, cookie)
-      : null;
 
     if (!usedType || !content || content.body === undefined) {
       const errorMsg =
